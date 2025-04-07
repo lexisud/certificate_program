@@ -50,10 +50,10 @@ dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 model = AutoModelForCausalLM.from_pretrained(
     model_config.model_to_train,
-    torch_dtype=dtype,
     attn_implementation=model_config.attention_type,
     trust_remote_code=True
 )
+
 
 # Force model to GPU if available
 if torch.cuda.is_available():
