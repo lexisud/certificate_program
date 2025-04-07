@@ -13,7 +13,6 @@ import torch
 from datasets import load_dataset
 import math
 import sys
-
 import shutil
 import os
 
@@ -23,13 +22,13 @@ logger = logging.getLogger(__name__)
 if len(sys.argv) == 1:
     raise ValueError("Missing configuration file. Please follow the instructions in the README.")
 
-config_file = sys.argv[1] if len(sys.argv) == 2 else sys.argv[2] # deepspeed will add --local_rank as arg
+config_file = sys.argv[1] if len(sys.argv) == 2 else sys.argv[2]  # deepspeed will add --local_rank as arg
 
 @dataclass
 class ModelConfig:
     model_to_train: str = field(default="models/GPTNeoX-160M")
     seq_len: int = field(default=512)
-    attention_type: str = field(default="flash_attention_2")
+    attention_type: str = field(default="eager")
     dataset: str = field(default="wikitext")
 
     def __post_init__(self):
@@ -40,17 +39,25 @@ class ModelConfig:
         if self.dataset == "minipile" and self.seq_len != 2048:
             raise ValueError("minipile dataset only has 2048 seq len split.")
 
-        
 parser = HfArgumentParser((ModelConfig, TrainingArguments))
 model_config, training_args = parser.parse_json_file(json_file=config_file)
 
 logger.info(f"Base model: {model_config.model_to_train}")
 logger.info(f"Saving to: {training_args.output_dir}")
 
-model = AutoModelForCausalLM.from_pretrained(model_config.model_to_train, 
-                                             torch_dtype=torch.bfloat16, 
-                                             attn_implementation=model_config.attention_type,
-                                             trust_remote_code=True)
+# Use float16 for fastest Colab training
+dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_config.model_to_train,
+    torch_dtype=dtype,
+    attn_implementation=model_config.attention_type,
+    trust_remote_code=True
+)
+
+# Force model to GPU if available
+if torch.cuda.is_available():
+    model = model.to("cuda")
 
 tokenizer = AutoTokenizer.from_pretrained(model_config.model_to_train)
 tokenizer.pad_token = tokenizer.eos_token
@@ -78,9 +85,7 @@ elif model_config.dataset == "minipile":
         2048: valid_dataset_2048
     }
 
-
 data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
 
 trainer = Trainer(
     model=model,
@@ -94,23 +99,21 @@ trainer = Trainer(
 trainer.train()
 trainer.save_model(training_args.output_dir)
 
-
+# Evaluation
 if model_config.dataset == "wikitext":
     results_512 = trainer.evaluate(eval_dataset=valid_dataset_512)
     print(f"Perplexity (512): {math.exp(results_512['eval_loss']):.2f}")
 
     results_2048 = trainer.evaluate(eval_dataset=valid_dataset_2048)
     print(f"Perplexity (2048): {math.exp(results_2048['eval_loss']):.2f}")
-
 else:
     results_2048 = trainer.evaluate(eval_dataset=valid_dataset_2048)
     print(f"Perplexity (2048): {math.exp(results_2048['eval_loss']):.2f}")
 
-
+# Save custom modeling file if needed
 source_file = os.path.join(model_config.model_to_train, "modeling_custom.py")
 destination_file = os.path.join(training_args.output_dir, "modeling_custom.py")
 
-# HACK: huggingface recent versions have a bug when saving custom modeling files. this ensures it is properly saved.
 try:
     shutil.copy2(source_file, destination_file)
 except FileNotFoundError:
