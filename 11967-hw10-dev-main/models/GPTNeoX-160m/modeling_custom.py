@@ -417,7 +417,7 @@ class GPTNeoXFlashAttention2(GPTNeoXAttention):
             value,
             attention_mask=attention_mask,
             dropout=attention_dropout,
-            causal=self.is_causal,
+            is_causal=self.is_causal,
             softmax_scale=self.norm_factor,
         )
 
