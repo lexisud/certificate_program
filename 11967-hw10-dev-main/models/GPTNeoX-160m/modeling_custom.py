@@ -372,56 +372,66 @@ class GPTNeoXFlashAttention2(GPTNeoXAttention):
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
 
-def forward(
-    self,
-    hidden_states: torch.FloatTensor,
-    attention_mask: torch.FloatTensor,
-    position_ids: torch.LongTensor,
-    head_mask: Optional[torch.FloatTensor] = None,
-    layer_past: Optional[Cache] = None,
-    use_cache: Optional[bool] = False,
-    output_attentions: Optional[bool] = False,
-    cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    def forward(
+        self,
+        hidden_states: torch.FloatTensor,
+        attention_mask: torch.FloatTensor,
+        position_ids: torch.LongTensor,
+        head_mask: Optional[torch.FloatTensor] = None,
+        layer_past: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     ):
+        # Apply attention-specific projections and rope
+        query, key, value, present = self._attn_projections_and_rope(
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            layer_past=layer_past,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
 
-    
-    # Apply attention-specific projections and rope
-    query, key, value, present = self._attn_projections_and_rope(
-        hidden_states=hidden_states,
-        position_ids=position_ids,
-        layer_past=layer_past,
-        use_cache=use_cache,
-        cache_position=cache_position,
-        position_embeddings=position_embeddings,
-    )
+        query_length = query.shape[-2]
 
-    # Expected shape for Flash Attention: [bsz, seqlen, nheads, head_dim]
-    query = query.permute(0, 2, 1, 3)
-    key = key.permute(0, 2, 1, 3)
-    value = value.permute(0, 2, 1, 3)
+        # GPT-neo-X casts query and key in fp32 to apply rotary embedding in full precision
+        target_dtype = value.dtype
+        if query.dtype != target_dtype:
+            query = query.to(target_dtype)
+        if key.dtype != target_dtype:
+            key = key.to(target_dtype)
 
-    # Flash Attention forward
-    attn_output = _flash_attention_forward(
-        query,
-        key,
-        value,
-        attention_mask=attention_mask,
-        dropout=self.attention_dropout.p if self.training else 0.0,
-        causal=self.is_causal,
-        softmax_scale=self.norm_factor,
-    )
+        #TODO: Permute to get the expected shape for Flash Attention
+        query = query.permute(0, 2, 1, 3)
+        key = key.permute(0, 2, 1, 3)
+        value = value.permute(0, 2, 1, 3)
 
-    # Restore shape and project
-    attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
-    attn_output = attn_output.view(attn_output.size(0), attn_output.size(1), -1)
-    attn_output = self.dense(attn_output)
+        attention_dropout = self.config.attention_dropout if self.training else 0.0
 
-    outputs = (attn_output, present)
-    if output_attentions:
-        # Flash attention doesn’t return weights
-        outputs += (None,)
-    return outputs
+        #TODO: Compute attention with _flash_attention_forward
+        attn_weights = _flash_attention_forward(
+            query,
+            key,
+            value,
+            attention_mask=attention_mask,
+            dropout=attention_dropout,
+            causal=self.is_causal,
+            softmax_scale=self.norm_factor,
+        )
+
+        #TODO: Reshape outputs before projection
+        attn_output = attn_weights.permute(0, 2, 1, 3).contiguous()
+        attn_output = attn_output.view(attn_output.size(0), attn_output.size(1), -1)
+
+        attn_output = self.dense(attn_output)
+
+        outputs = (attn_output, layer_past)
+        if output_attentions:
+            outputs += (None,)
+
+        return outputs
 
 
 
